@@ -229,6 +229,27 @@ pub fn rules() -> Vec<Rule> {
             production: Box::new(|nodes| Some(nodes[0].token_data.clone())),
         },
         Rule {
+            name: "at <time> (uk)".to_string(),
+            pattern: vec![regex("о"), dim(DimensionKind::Ordinal)],
+            production: Box::new(|nodes| {
+                match &nodes[1].token_data {
+                    TokenData::Ordinal(v) => Some(TokenData::Time(TimeData {
+                        form: TimeForm::Hour(v.value as u32, true),
+                        direction: None,
+                        latent: false,
+                        open_interval_direction: None,
+                        early_late: None,
+                        timezone: None, 
+                        not_immediate: true,
+                        ok_for_this_next: false,
+                        holiday: None
+                })),
+                    _ => None
+                }
+            }),
+
+        },
+        Rule {
             name: "last <time> (uk)".to_string(),
             pattern: vec![regex("(в\\s+)?минул(ий|а|ого|ому|ої|у)"), dim(DimensionKind::Time)],
             production: Box::new(|nodes| {
