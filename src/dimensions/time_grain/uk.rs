@@ -22,7 +22,7 @@ pub fn rules() -> Vec<Rule> {
         },
         Rule {
             name: "day (grain)".to_string(),
-            pattern: vec![regex("день|дн(і|я)в?")],
+            pattern: vec![regex("\\bдоб(а|у|и)\\b|день|дн(і|я)в?")],
             production: Box::new(|_| Some(TokenData::TimeGrain(Grain::Day))),
         },
         Rule {

@@ -89,29 +89,84 @@ fn ru_month_num(s: &str) -> Option<u32> {
 pub fn rules() -> Vec<Rule> {
     let mut rules = super::en::rules();
     rules.extend(vec![
+        // `\b` on every one of these, as en.rs already does on its own.
+        //
+        // Without it a pattern is found inside any longer word that contains it,
+        // and Russian is full of them: `вс` (Sunday) lives inside `встречу`,
+        // `пт` (Friday) inside `аптеку`, `ср` (Wednesday) inside `среды`, and
+        // `завтра` inside `послезавтра` — which reads as the opposite day and
+        // set an alarm 24 hours early.
+        //
+        // The alternations need `(?:…)` around them as well as `\b` at the ends.
+        // `\bа|б\b` binds as `(\bа)|(б\b)`, so only the first and last branch
+        // would be anchored. The group is non-capturing, so the numbering the
+        // productions below read stays as it was.
         Rule {
             name: "now (ru)".to_string(),
-            pattern: vec![regex("сейчас")],
+            pattern: vec![regex("\\bсейчас\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Now)))),
         },
         Rule {
             name: "today (ru)".to_string(),
-            pattern: vec![regex("сегодня")],
+            pattern: vec![regex("\\bсегодня\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Today)))),
         },
         Rule {
             name: "tomorrow (ru)".to_string(),
-            pattern: vec![regex("завтра")],
+            pattern: vec![regex("\\bзавтра\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Tomorrow)))),
         },
         Rule {
             name: "yesterday (ru)".to_string(),
-            pattern: vec![regex("вчера")],
+            pattern: vec![regex("\\bвчера\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Yesterday)))),
+        },
+        // New. Anchoring `завтра` and `вчера` stops them being found inside
+        // these two words, which would otherwise leave the words themselves
+        // parsing as nothing — and "the day after tomorrow" is an ordinary
+        // thing to say to a reminder app.
+        Rule {
+            name: "day after tomorrow (ru)".to_string(),
+            pattern: vec![regex("\\bпослезавтра\\b")],
+            production: Box::new(|_| {
+                Some(TokenData::Time(TimeData::new(TimeForm::DayAfterTomorrow)))
+            }),
+        },
+        Rule {
+            name: "day before yesterday (ru)".to_string(),
+            pattern: vec![regex("\\bпозавчера\\b")],
+            production: Box::new(|_| {
+                Some(TokenData::Time(TimeData::new(TimeForm::DayBeforeYesterday)))
+            }),
+        },
+        // Three days either way, and the last of the series anyone says. There
+        // is no TimeForm for three, so these use GrainOffset rather than
+        // RelativeGrain: GrainOffset snaps to the start of the day, which is
+        // what the neighbours above resolve to, while RelativeGrain keeps the
+        // reference time of day and would answer "in three days at 04:30".
+        Rule {
+            name: "three days ago (ru)".to_string(),
+            pattern: vec![regex("\\bпозапозавчера\\b")],
+            production: Box::new(|_| {
+                Some(TokenData::Time(TimeData::new(TimeForm::GrainOffset {
+                    grain: Grain::Day,
+                    offset: -3,
+                })))
+            }),
+        },
+        Rule {
+            name: "in three days (ru)".to_string(),
+            pattern: vec![regex("\\bпослепослезавтра\\b")],
+            production: Box::new(|_| {
+                Some(TokenData::Time(TimeData::new(TimeForm::GrainOffset {
+                    grain: Grain::Day,
+                    offset: 3,
+                })))
+            }),
         },
         Rule {
             name: "day of week (ru)".to_string(),
-            pattern: vec![regex("понедельник(а)?|пн|вторник(а)?|вт|сред(а|у)|ср|четверг(а)?|чт|пятниц(а|у)|пт|суббот(а|у)|сб|воскресенье|вс|в\\s+пятницу")],
+            pattern: vec![regex("\\b(?:понедельник(а)?|пн|вторник(а)?|вт|сред(а|у)|ср|четверг(а)?|чт|пятниц(а|у)|пт|суббот(а|у)|сб|воскресенье|вс|в\\s+пятницу)\\b")],
             production: Box::new(|nodes| {
                 let s = match &nodes[0].token_data {
                     TokenData::RegexMatch(m) => m.group(0)?.trim(),
@@ -213,8 +268,21 @@ pub fn rules() -> Vec<Rule> {
             pattern: vec![dim(DimensionKind::Time), predicate(is_part_of_day)],
             production: Box::new(|nodes| {
                 let t = time_data(&nodes[0].token_data)?.clone();
-                let p = time_data(&nodes[1].token_data)?.clone();
-                Some(TokenData::Time(TimeData::new(TimeForm::Composed(Box::new(t), Box::new(p)))))
+                // let p = time_data(&nodes[1].token_data)?.clone();
+                match &nodes[1].token_data {
+                    TokenData::Time(time_data) => {
+                        match time_data.form {
+                            TimeForm::PartOfDay(PartOfDay::Morning) => {
+                                apply_ampm(&t.form, false)
+                            },
+                            TimeForm::PartOfDay(PartOfDay::Evening) => {
+                                apply_ampm(&t.form, true)
+                            },
+                            _ => None
+                        }
+                    },
+                    _ => None
+                }
             }),
         },
         Rule {
@@ -1825,4 +1893,47 @@ pub fn rules() -> Vec<Rule> {
         },
     ]);
     rules
+}
+
+// ====================================================================
+// Helper functions from time/en.rs
+// ====================================================================
+fn apply_ampm(form: &TimeForm, is_pm: bool) -> Option<TokenData> {
+    match form {
+        TimeForm::Hour(h, _) => {
+            let hour = if is_pm && *h < 12 {
+                h.checked_add(12)?
+            } else if !is_pm && *h == 12 {
+                0
+            } else {
+                *h
+            };
+            Some(TokenData::Time(TimeData::new(TimeForm::Hour(hour, false))))
+        }
+        TimeForm::HourMinute(h, m, _) => {
+            let hour = if is_pm && *h < 12 {
+                h.checked_add(12)?
+            } else if !is_pm && *h == 12 {
+                0
+            } else {
+                *h
+            };
+            Some(TokenData::Time(TimeData::new(TimeForm::HourMinute(
+                hour, *m, false,
+            ))))
+        }
+        TimeForm::HourMinuteSecond(h, m, s) => {
+            let hour = if is_pm && *h < 12 {
+                h.checked_add(12)?
+            } else if !is_pm && *h == 12 {
+                0
+            } else {
+                *h
+            };
+            Some(TokenData::Time(TimeData::new(TimeForm::HourMinuteSecond(
+                hour, *m, *s,
+            ))))
+        }
+        _ => None,
+    }
 }

@@ -55,21 +55,28 @@ fn is_month(td: &TokenData) -> bool {
     )
 }
 
+/// Month names in the forms Ukrainian actually writes.
+///
+/// Three per month, not one: nominative (*жовтень*), genitive (*жовтня*, which
+/// is what a date takes — *3 жовтня*) and **locative** (*жовтні*, which is what
+/// the preposition *у/в* takes — *у жовтні*, "in October"). The locative row was
+/// missing, so "у жовтні" parsed as nothing at all.
 fn uk_month_num(s: &str) -> Option<u32> {
     let t = s.to_lowercase();
     match t.as_str() {
-        "січень" | "січня" | "січ" => Some(1),
-        "лютий" | "лютого" | "лют" => Some(2),
-        "березень" | "березня" | "бер" => Some(3),
-        "квітень" | "квітня" | "квіт" => Some(4),
-        "травень" | "травня" | "трав" => Some(5),
-        "червень" | "червня" | "чер" => Some(6),
-        "липень" | "липня" | "лип" => Some(7),
-        "серпень" | "серпня" | "серп" | "сер" => Some(8),
-        "вересень" | "вересня" | "верес" | "вер" => Some(9),
-        "жовтень" | "жовтня" | "жовт" => Some(10),
-        "листопад" | "листопада" | "лист" | "лис" => Some(11),
-        "грудень" | "грудня" | "груд" | "гру" => Some(12),
+        "січень" | "січня" | "січні" | "січ" => Some(1),
+        // лютий is an adjective, so its locative is лютому rather than -і.
+        "лютий" | "лютого" | "лютому" | "лют" => Some(2),
+        "березень" | "березня" | "березні" | "бер" => Some(3),
+        "квітень" | "квітня" | "квітні" | "квіт" => Some(4),
+        "травень" | "травня" | "травні" | "трав" => Some(5),
+        "червень" | "червня" | "червні" | "чер" => Some(6),
+        "липень" | "липня" | "липні" | "лип" => Some(7),
+        "серпень" | "серпня" | "серпні" | "серп" | "сер" => Some(8),
+        "вересень" | "вересня" | "вересні" | "верес" | "вер" => Some(9),
+        "жовтень" | "жовтня" | "жовтні" | "жовт" => Some(10),
+        "листопад" | "листопада" | "листопаді" | "лист" | "лис" => Some(11),
+        "грудень" | "грудня" | "грудні" | "груд" | "гру" => Some(12),
         _ => None,
     }
 }
@@ -95,29 +102,97 @@ fn uk_hour_word(s: &str) -> Option<u32> {
 pub fn rules() -> Vec<Rule> {
     let mut rules = super::en::rules();
     rules.extend(vec![
+        // `\b` for the same reason as ru.rs, and it bites harder here: `пн`
+        // (Monday) is found inside `наступного` ("next"), so *"наступного
+        // понеділка"* answered with two entities and the wrong one started
+        // earlier in the sentence. `завтра` inside `післязавтра` is the same
+        // day-early bug Russian has.
         Rule {
             name: "now (uk)".to_string(),
-            pattern: vec![regex("зараз")],
+            pattern: vec![regex("\\bзараз\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Now)))),
         },
         Rule {
             name: "today (uk)".to_string(),
-            pattern: vec![regex("сьогодні")],
+            pattern: vec![regex("\\bсьогодні\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Today)))),
         },
         Rule {
             name: "tomorrow (uk)".to_string(),
-            pattern: vec![regex("завтра")],
+            pattern: vec![regex("\\bзавтра\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Tomorrow)))),
         },
         Rule {
             name: "yesterday (uk)".to_string(),
-            pattern: vec![regex("вчора")],
+            pattern: vec![regex("\\bвчора\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::Yesterday)))),
         },
         Rule {
+            name: "day after tomorrow (uk)".to_string(),
+            pattern: vec![regex("\\bпіслязавтра\\b")],
+            production: Box::new(|_| {
+                Some(TokenData::Time(TimeData::new(TimeForm::DayAfterTomorrow)))
+            }),
+        },
+        // A month standing on its own. Russian has had this since the port;
+        // Ukrainian never did, so month names only resolved inside a longer
+        // pattern like "3 жовтня" and a bare "у жовтні" was nothing.
+        Rule {
+            name: "<named-month> (uk)".to_string(),
+            pattern: vec![regex(
+                "\\b(?:січень|січня|січні|січ|лютий|лютого|лютому|лют|березень|березня|березні|бер\
+                 |квітень|квітня|квітні|квіт|травень|травня|травні|трав|червень|червня|червні|чер\
+                 |липень|липня|липні|лип|серпень|серпня|серпні|серп|вересень|вересня|вересні|верес\
+                 |жовтень|жовтня|жовтні|жовт|листопад|листопада|листопаді|лист|грудень|грудня\
+                 |грудні|груд)\\b",
+            )],
+            production: Box::new(|nodes| {
+                let s = match &nodes[0].token_data {
+                    TokenData::RegexMatch(m) => m.group(0)?,
+                    _ => return None,
+                };
+                let month = uk_month_num(s)?;
+                Some(TokenData::Time(TimeData::new(TimeForm::Month(month))))
+            }),
+        },
+        // "третій день у жовтні" — the third day in October. Mirrors the
+        // English "the <ordinal> <cycle> of <time>" rule; the preposition is
+        // у or в, which Ukrainian alternates purely for sound.
+        Rule {
+            name: "<ordinal> <cycle> у <time> (uk)".to_string(),
+            pattern: vec![
+                dim(DimensionKind::Ordinal),
+                dim(DimensionKind::TimeGrain),
+                regex("\\b[ув]\\b"),
+                dim(DimensionKind::Time),
+            ],
+            production: Box::new(|nodes| {
+                let n = match &nodes[0].token_data {
+                    TokenData::Ordinal(d) => d.value as i32,
+                    _ => return None,
+                };
+                let grain = match &nodes[1].token_data {
+                    TokenData::TimeGrain(g) => *g,
+                    _ => return None,
+                };
+                let base = time_data(&nodes[3].token_data)?;
+                Some(TokenData::Time(TimeData::new(TimeForm::NthGrainOfTime {
+                    n,
+                    grain,
+                    base: Box::new(base.clone()),
+                })))
+            }),
+        },
+        Rule {
+            name: "day before yesterday (uk)".to_string(),
+            pattern: vec![regex("\\bпозавчора\\b")],
+            production: Box::new(|_| {
+                Some(TokenData::Time(TimeData::new(TimeForm::DayBeforeYesterday)))
+            }),
+        },
+        Rule {
             name: "day of week (uk)".to_string(),
-            pattern: vec![regex("понеділ(ок|ка)|пн|вівтор(ок|ка)|вт|серед(а|у)|ср|четвер(га)?|чт|п'ятниц(я|і|ю)|пт|субот(а|и|у)|сб|неділ(я|і|ю)|нд")],
+            pattern: vec![regex("\\b(?:понеділ(ок|ка)|пн|вівтор(ок|ка)|вт|серед(а|у)|ср|четвер(га)?|чт|п'ятниц(я|і|ю)|пт|субот(а|и|у)|сб|неділ(я|і|ю)|нд)\\b")],
             production: Box::new(|nodes| {
                 let s = match &nodes[0].token_data {
                     TokenData::RegexMatch(m) => m.group(0)?.to_lowercase(),
@@ -293,7 +368,7 @@ pub fn rules() -> Vec<Rule> {
         },
         Rule {
             name: "evening (uk)".to_string(),
-            pattern: vec![regex("увечері|ввечері|вечір")],
+            pattern: vec![regex("\\bувечері\\b|\\bввечері\\b|\\bвечір\\b|\\bвечор(а)?\\b")],
             production: Box::new(|_| Some(TokenData::Time(TimeData::new(TimeForm::PartOfDay(PartOfDay::Evening))))),
         },
         Rule {
@@ -317,8 +392,21 @@ pub fn rules() -> Vec<Rule> {
             pattern: vec![dim(DimensionKind::Time), predicate(is_part_of_day)],
             production: Box::new(|nodes| {
                 let t = time_data(&nodes[0].token_data)?.clone();
-                let p = time_data(&nodes[1].token_data)?.clone();
-                Some(TokenData::Time(TimeData::new(TimeForm::Composed(Box::new(t), Box::new(p)))))
+                // let p = time_data(&nodes[1].token_data)?.clone();
+                match &nodes[1].token_data {
+                    TokenData::Time(time_data) => {
+                        match time_data.form {
+                            TimeForm::PartOfDay(PartOfDay::Morning) => {
+                                apply_ampm(&t.form, false)
+                            },
+                            TimeForm::PartOfDay(PartOfDay::Evening) => {
+                                apply_ampm(&t.form, true)
+                            },
+                            _ => None
+                        }
+                    },
+                    _ => None
+                }
             }),
         },
         Rule {
@@ -914,7 +1002,7 @@ pub fn rules() -> Vec<Rule> {
         },
         Rule {
             name: "in <duration> (uk)".to_string(),
-            pattern: vec![regex("через"), dim(DimensionKind::Duration)],
+            pattern: vec![regex("\\bчерез\\b"), dim(DimensionKind::Duration)],
             production: Box::new(|nodes| {
                 let d = match &nodes[1].token_data {
                     TokenData::Duration(d) => d,
@@ -1353,4 +1441,46 @@ pub fn rules() -> Vec<Rule> {
         },
     ]);
     rules
+}
+// ====================================================================
+// Helper functions from time/en.rs
+// ====================================================================
+fn apply_ampm(form: &TimeForm, is_pm: bool) -> Option<TokenData> {
+    match form {
+        TimeForm::Hour(h, _) => {
+            let hour = if is_pm && *h < 12 {
+                h.checked_add(12)?
+            } else if !is_pm && *h == 12 {
+                0
+            } else {
+                *h
+            };
+            Some(TokenData::Time(TimeData::new(TimeForm::Hour(hour, false))))
+        }
+        TimeForm::HourMinute(h, m, _) => {
+            let hour = if is_pm && *h < 12 {
+                h.checked_add(12)?
+            } else if !is_pm && *h == 12 {
+                0
+            } else {
+                *h
+            };
+            Some(TokenData::Time(TimeData::new(TimeForm::HourMinute(
+                hour, *m, false,
+            ))))
+        }
+        TimeForm::HourMinuteSecond(h, m, s) => {
+            let hour = if is_pm && *h < 12 {
+                h.checked_add(12)?
+            } else if !is_pm && *h == 12 {
+                0
+            } else {
+                *h
+            };
+            Some(TokenData::Time(TimeData::new(TimeForm::HourMinuteSecond(
+                hour, *m, *s,
+            ))))
+        }
+        _ => None,
+    }
 }
